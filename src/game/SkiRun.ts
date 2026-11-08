@@ -1,9 +1,13 @@
 import * as THREE from 'three'
 import {
+  ATTACK_CONFIG,
+  BOMB_CONFIG,
   GAME,
   HAZARD_CONFIG,
   JACKETS,
   OBSTACLE_CONFIG,
+  RIVAL_CONFIG,
+  type AttackKind,
   type HudSnapshot,
   type JacketOption,
   type RunResult,
@@ -23,7 +27,7 @@ import {
 } from './world'
 import { Rival } from './rival'
 import { Truck } from './truck'
-import { Snowfall, SnowSpray } from './effects'
+import { Snowfall, SnowSpray, Blast, Bomb, Impact } from './effects'
 import { skiAudio } from './audio'
 
 export type SkiPhase = 'ready' | 'running' | 'paused' | 'over'
@@ -46,13 +50,9 @@ type Action = 'left' | 'right' | 'up' | 'down'
 
 const KEY_ACTIONS: Record<string, Action> = {
   ArrowLeft: 'left',
-  KeyA: 'left',
   ArrowRight: 'right',
-  KeyD: 'right',
   ArrowUp: 'up',
-  KeyW: 'up',
   ArrowDown: 'down',
-  KeyS: 'down',
 }
 
 const SKY_VERTEX = `
@@ -142,6 +142,28 @@ export class SkiRun {
   private readonly touch: Record<Action, boolean> = { left: false, right: false, up: false, down: false }
   /** 摇杆给出的模拟量转向（-1 ~ 1），带阻尼后才会作用到滑雪人身上 */
   private steerAxis = 0
+
+  /** 摇杆画圈给出的旋转输入（rad/s，顺时针为正） */
+  private spinInput = 0
+  private spinInputTimer = 0
+  private spinVelocity = 0
+  private spinAngle = 0
+
+  /** 正在播放的动作，以及它的剩余时间 / 总时长 */
+  private actionKind: 'punch' | 'kick' | 'bomb' | null = null
+  private actionTimer = 0
+  private actionDuration = 0
+  /** 动作朝向：-1 左侧，1 右侧 */
+  private actionSide = 1
+  private readonly actionCooldown: Record<'punch' | 'kick' | 'bomb', number> = { punch: 0, kick: 0, bomb: 0 }
+  private readonly bombs: Bomb[] = []
+  private readonly blasts: Blast[] = []
+  private readonly impacts: Impact[] = []
+  private bombTipShown = false
+  /** 对手已经出招、还没打到你身上的那一下 */
+  private pendingRivalStrike: { rival: Rival; kind: AttackKind; timer: number } | null = null
+  /** 玩家挥杆/踢腿前摇结束后的那一下判定 */
+  private pendingPlayerStrike: { target: Rival; kind: AttackKind; timer: number } | null = null
 
   constructor(options: SkiRunOptions) {
     this.options = options
@@ -286,6 +308,8 @@ export class SkiRun {
       this.touch[action] = false
     })
     this.steerAxis = 0
+    this.spinInput = 0
+    this.spinInputTimer = 0
     this.jumpRequested = false
   }
 
@@ -364,9 +388,49 @@ export class SkiRun {
     this.steerAxis = THREE.MathUtils.clamp(Number.isFinite(value) ? value : 0, -1, 1)
   }
 
+  /** 移动端摇杆画圈：正值顺时针、负值逆时针，单位 rad/s */
+  setSpin(value: number): void {
+    const rate = Number.isFinite(value) ? value : 0
+    this.spinInput = THREE.MathUtils.clamp(rate, -18, 18)
+    this.spinInputTimer = 0.14
+  }
+
   /** 空格或移动端“跳”按钮 */
   jump(): void {
     if (this.phase === 'running' && !this.airborne) this.jumpRequested = true
+  }
+
+  /** 挥雪杖 / 飞踢：只对身边最近的对手生效 */
+  attack(kind: AttackKind): void {
+    if (this.phase !== 'running') return
+    if (this.actionCooldown[kind] > 0) return
+    const config = ATTACK_CONFIG[kind]
+    this.actionCooldown[kind] = config.cooldown
+    const target = this.nearestRival(config.range, config.reach)
+    // 敌人在左侧就用左手左脚，在右侧就用右手右脚
+    this.actionSide = target ? (target.x >= this.x ? 1 : -1) : this.lateral >= 0 ? 1 : -1
+    this.playAction(kind)
+    if (kind === 'punch') skiAudio.swing(false)
+    else skiAudio.kick(false)
+    if (!target) return
+    // 等动作打到一半再结算命中，特效和音效才对得上挥杆/踢腿
+    this.pendingPlayerStrike = { target, kind, timer: 0.18 }
+  }
+
+  /** 丢下爆弹：留在身后，等别人靠近再炸 */
+  dropBomb(): void {
+    if (this.phase !== 'running') return
+    if (this.actionCooldown.bomb > 0) return
+    this.actionCooldown.bomb = BOMB_CONFIG.cooldown
+    this.playAction('bomb')
+    const bomb = new Bomb(this.x, this.y + 0.4, this.z + 1.4, BOMB_CONFIG.life)
+    this.scene.add(bomb.group)
+    this.bombs.push(bomb)
+    skiAudio.bombDrop()
+    if (!this.bombTipShown) {
+      this.bombTipShown = true
+      this.pushToast('爆弹丢在身后，谁靠近谁倒霉', 'info')
+    }
   }
 
   getPhase(): SkiPhase {
@@ -409,6 +473,21 @@ export class SkiRun {
     this.sprayTimer = 0
     this.cheerCooldown = 0
     this.lowHealthWarned = false
+    this.spinInput = 0
+    this.spinInputTimer = 0
+    this.spinVelocity = 0
+    this.spinAngle = 0
+    this.actionKind = null
+    this.actionTimer = 0
+    this.actionDuration = 0
+    this.actionSide = 1
+    this.actionCooldown.punch = 0
+    this.actionCooldown.kick = 0
+    this.actionCooldown.bomb = 0
+    this.bombTipShown = false
+    this.pendingRivalStrike = null
+    this.pendingPlayerStrike = null
+    this.clearEffects()
     this.spray.clear()
     this.skier.resetPose()
     this.skier.group.position.set(0, this.y, 0)
@@ -562,6 +641,8 @@ export class SkiRun {
     this.updateChunks()
     this.updateRivals(dt)
     this.updateTruck(dt)
+    this.updateBombs(dt)
+    this.updateImpacts(dt)
     this.updatePickups(dt)
     this.updateHazards(dt)
     this.animateMarker(dt)
@@ -575,6 +656,8 @@ export class SkiRun {
   }
 
   private step(dt: number): void {
+    this.tickActionTimers(dt)
+    this.updateSpin(dt)
     const slope = slopeAt(this.z)
     const keyboardSteer = Number(this.isDown('right')) - Number(this.isDown('left'))
     const steeringInput = keyboardSteer !== 0 ? keyboardSteer : this.steerAxis
@@ -598,7 +681,7 @@ export class SkiRun {
     const steerFactor = this.airborne ? 0.62 : 1
     const targetLateral = THREE.MathUtils.clamp(steeringInput, -1, 1) * GAME.steerSpeed * steerFactor
     // 摇杆要“肉”一点：响应更慢 + 释放时缓缓回正；键盘保持跟手
-    const response = this.airborne ? 2.2 : keyboardSteer !== 0 ? 5.6 : 3.1
+    const response = this.airborne ? 2.6 : keyboardSteer !== 0 ? 5.6 : 4.2
     this.lateral += (targetLateral - this.lateral) * Math.min(1, dt * response)
     this.x += this.lateral * dt
     this.applyCourseBounds(dt)
@@ -619,7 +702,10 @@ export class SkiRun {
     this.skier.update(dt, this.currentPose())
 
     this.checkCollisions(dt)
-    this.checkRivalCollisions()
+    this.checkRivalAttacks()
+    this.updatePlayerStrikes(dt)
+    this.updateRivalStrikes(dt)
+    this.separateRivals(dt)
     this.checkTruckCollision()
     if (this.phase !== 'running') return
 
@@ -641,6 +727,11 @@ export class SkiRun {
       time: this.time,
       airborne: this.airborne,
       airHeight: this.jumpHeight,
+      spin: this.spinAngle,
+      action: this.actionKind,
+      actionProgress:
+        this.actionKind && this.actionDuration > 0 ? 1 - this.actionTimer / this.actionDuration : 0,
+      actionSide: this.actionSide,
     }
   }
 
@@ -734,7 +825,7 @@ export class SkiRun {
       const rival = this.rivals[i]
       if (!rival) continue
       if (this.phase === 'running') rival.update(dt, this.x, this.z, this.speed)
-      if (rival.z > this.z + 46 || rival.z < this.z - 260) {
+      if (rival.gone || rival.z > this.z + 46 || rival.z < this.z - 260) {
         rival.dispose()
         this.rivals.splice(i, 1)
       }
@@ -763,36 +854,101 @@ export class SkiRun {
     this.pushToast('小心，前面有别的滑雪者！', 'info')
   }
 
-  private checkRivalCollisions(): void {
+  /** 玩家的攻击前摇结束，目标还在范围内才算命中 */
+  private updatePlayerStrikes(dt: number): void {
+    const pending = this.pendingPlayerStrike
+    if (!pending) return
+    pending.timer -= dt
+    if (pending.timer > 0) return
+    this.pendingPlayerStrike = null
+    if (this.phase !== 'running') return
+    const target = pending.target
+    if (!this.rivals.includes(target) || target.knockedOut || target.hurtCooldown > 0) return
+    const config = ATTACK_CONFIG[pending.kind]
+    const dx = target.x - this.x
+    const dz = target.z - this.z
+    if (Math.abs(dx) > config.reach || Math.abs(dz) > config.range) return
+    skiAudio.impact(pending.kind)
+    this.strikeRival(target, pending.kind)
+  }
+
+  /**
+   * 对手靠近后会主动出手打你。
+   * 这里不再靠身体接触扣体力：只有真被对方的挥杆或飞踢打中才掉血。
+   */
+  private checkRivalAttacks(): void {
     if (this.invulnerable > 0 || this.jumpHeight > 1.35) return
     for (const rival of this.rivals) {
-      if (rival.hitCooldown > 0) continue
+      if (rival.knockedOut || rival.stun > 0 || rival.attackCooldown > 0) continue
       const dx = this.x - rival.x
       const dz = this.z - rival.z
-      if (dx * dx + dz * dz > 1.85 * 1.85) continue
-      this.hitRival(rival)
+      if (dx * dx + dz * dz > RIVAL_CONFIG.attackRange * RIVAL_CONFIG.attackRange) continue
+      const kind: AttackKind = Math.random() < 0.55 ? 'punch' : 'kick'
+      // 玩家在对手哪一侧，对手就用哪只手 / 哪条腿
+      rival.attack(kind, dx >= 0 ? 1 : -1)
+      this.pendingRivalStrike = { rival, kind, timer: 0.16 }
       return
     }
   }
 
-  private hitRival(rival: Rival): void {
-    const damage = 18
+  /** 对手出招的前摇结束，真的打到你身上才扣体力 */
+  private updateRivalStrikes(dt: number): void {
+    const pending = this.pendingRivalStrike
+    if (!pending) return
+    pending.timer -= dt
+    if (pending.timer > 0) return
+    this.pendingRivalStrike = null
+    if (this.phase !== 'running' || this.invulnerable > 0) return
+    // 对手可能已经离场
+    if (!this.rivals.includes(pending.rival)) return
+    // 被你抢攻打断，或者已经跑出了攻击范围，这一下就落空
+    if (pending.rival.knockedOut || pending.rival.stun > 0) return
+    const dx = this.x - pending.rival.x
+    const dz = this.z - pending.rival.z
+    if (dx * dx + dz * dz > 4.2 * 4.2) return
+    this.takeRivalHit(pending.rival, pending.kind)
+  }
+
+  /** 贴在一起时轻轻挤开，不扣体力 */
+  private separateRivals(dt: number): void {
+    for (const rival of this.rivals) {
+      if (rival.knockedOut) continue
+      const dx = this.x - rival.x
+      const dz = this.z - rival.z
+      const distance = Math.hypot(dx, dz)
+      if (distance > 1.8 || distance < 0.0001) continue
+      const push = (1.8 - distance) * Math.min(1, dt * 8)
+      const direction = dx >= 0 ? 1 : -1
+      const width = courseHalfWidthAt(this.z)
+      this.x = THREE.MathUtils.clamp(this.x + direction * push * 0.5, -width, width)
+      rival.x = THREE.MathUtils.clamp(rival.x - direction * push * 0.5, -11, 11)
+    }
+  }
+
+  /** 被对手打中：掉体力、扣分、闪红 */
+  private takeRivalHit(rival: Rival, kind: AttackKind): void {
+    const damage = kind === 'punch' ? 12 : 16
+    const penalty = kind === 'punch' ? 80 : 120
     this.health = Math.max(0, this.health - damage)
-    this.score = Math.max(0, this.score - 120)
+    this.score = Math.max(0, this.score - penalty)
     this.hits += 1
-    this.speed *= 0.82
+    this.speed *= 0.9
     const direction = this.x >= rival.x ? 1 : -1
     const width = courseHalfWidthAt(this.z)
-    this.x = THREE.MathUtils.clamp(this.x + direction * 0.9, -width, width)
-    this.lateral = direction * 3.2
-    this.invulnerable = 1.1
-    this.shake = 0.9
+    this.x = THREE.MathUtils.clamp(this.x + direction * 0.55, -width, width)
+    this.lateral = direction * 2.2
+    this.invulnerable = 1.2
+    this.shake = Math.max(this.shake, 0.8)
     this.damageFlash = 1
-    this.spray.burst(this.x, this.y + 0.3, this.z, 20)
-    rival.knock(direction)
-    skiAudio.hit('rock')
+    this.spawnImpact(this.x, this.y + 1.1, this.z, '#ff9d9d', 1.05)
+    this.spray.burst(this.x, this.y + 0.5, this.z, 12)
+    if (kind === 'punch') skiAudio.swing(true)
+    else skiAudio.kick(true)
     if (this.hasCrowdNearby()) skiAudio.gasp()
-    this.pushToast(`−120 分 · 被滑雪者撞了一下，体力 −${damage}`, 'bad')
+    this.pushToast(
+      `−${penalty} 分 · 被对手${kind === 'punch' ? '一杆扫中' : '一脚踢中'}，体力 −${damage}`,
+      'bad',
+    )
     this.emitHud()
 
     if (this.health < 32 && !this.lowHealthWarned) {
@@ -800,6 +956,179 @@ export class SkiRun {
       this.pushToast('体力不足，稳住方向！', 'bad')
     }
     if (this.health <= 0) this.finish('health')
+  }
+
+  /* ---------- 动手：挥杆 / 踹人 / 爆弹 ---------- */
+
+  private tickActionTimers(dt: number): void {
+    this.actionCooldown.punch = Math.max(0, this.actionCooldown.punch - dt)
+    this.actionCooldown.kick = Math.max(0, this.actionCooldown.kick - dt)
+    this.actionCooldown.bomb = Math.max(0, this.actionCooldown.bomb - dt)
+    if (this.actionTimer <= 0) return
+    this.actionTimer = Math.max(0, this.actionTimer - dt)
+    if (this.actionTimer === 0) this.actionKind = null
+  }
+
+  /** 摇杆画圈的旋转：输入消失后自然减速，最后转回正前方 */
+  private updateSpin(dt: number): void {
+    if (this.spinInputTimer > 0) this.spinInputTimer = Math.max(0, this.spinInputTimer - dt)
+    const target = this.spinInputTimer > 0 ? this.spinInput : 0
+    this.spinVelocity += (target - this.spinVelocity) * Math.min(1, dt * 9)
+    this.spinAngle += this.spinVelocity * dt
+
+    if (Math.abs(this.spinVelocity) < 0.25 && Math.abs(target) < 0.25) {
+      const nearest = Math.round(this.spinAngle / (Math.PI * 2)) * (Math.PI * 2)
+      this.spinAngle += (nearest - this.spinAngle) * Math.min(1, dt * 6)
+      if (Math.abs(nearest - this.spinAngle) < 0.008) {
+        this.spinAngle = nearest
+        this.spinVelocity = 0
+      }
+    }
+  }
+
+  private playAction(kind: 'punch' | 'kick' | 'bomb'): void {
+    this.actionKind = kind
+    this.actionDuration = kind === 'bomb' ? BOMB_CONFIG.duration : ATTACK_CONFIG[kind].duration
+    this.actionTimer = this.actionDuration
+  }
+
+  /** 身边最近的可攻击对手 */
+  private nearestRival(range: number, reach: number): Rival | null {
+    let best: Rival | null = null
+    let bestDistance = Number.POSITIVE_INFINITY
+    for (const rival of this.rivals) {
+      if (rival.knockedOut || rival.hurtCooldown > 0) continue
+      const dx = rival.x - this.x
+      const dz = rival.z - this.z
+      if (Math.abs(dx) > reach || Math.abs(dz) > range) continue
+      const distance = dx * dx + dz * dz
+      if (distance < bestDistance) {
+        bestDistance = distance
+        best = rival
+      }
+    }
+    return best
+  }
+
+  private strikeRival(rival: Rival, kind: AttackKind): void {
+    const config = ATTACK_CONFIG[kind]
+    const direction = this.x >= rival.x ? 1 : -1
+    rival.knock(direction)
+    rival.stun = 0.9
+    rival.hurtCooldown = 0.45
+    const knockedOut = rival.damage(config.damage)
+    const bonus = config.bonus + (knockedOut ? RIVAL_CONFIG.koBonus : 0)
+    this.score += bonus
+    this.shake = Math.max(this.shake, knockedOut ? 0.75 : 0.45)
+    this.spawnImpact(
+      rival.x,
+      heightAt(rival.z) + 1.15,
+      rival.z,
+      kind === 'punch' ? '#dff4ff' : '#ffd08a',
+      kind === 'kick' ? 1.3 : 1,
+    )
+    this.spray.burst(rival.x, this.y + 0.9, rival.z, 12)
+    this.pushToast(
+      knockedOut
+        ? `${config.label}命中，对手被撞翻了！+${bonus} 分`
+        : `${config.label}命中！+${bonus} 分`,
+      'good',
+    )
+    this.emitHud()
+  }
+
+  private updateBombs(dt: number): void {
+    for (let i = this.bombs.length - 1; i >= 0; i--) {
+      const bomb = this.bombs[i]
+      if (!bomb) continue
+      bomb.update(dt)
+      const armed = bomb.elapsedTime > BOMB_CONFIG.armDelay
+      const triggered =
+        armed && this.hasRivalNear(bomb.x, bomb.z, BOMB_CONFIG.triggerRadius)
+      if (!triggered && !bomb.expired) continue
+      this.explodeBomb(bomb)
+      bomb.dispose()
+      this.bombs.splice(i, 1)
+    }
+
+    for (let i = this.blasts.length - 1; i >= 0; i--) {
+      const blast = this.blasts[i]
+      if (!blast) continue
+      if (blast.update(dt)) continue
+      blast.dispose()
+      this.blasts.splice(i, 1)
+    }
+  }
+
+  private updateImpacts(dt: number): void {
+    for (let i = this.impacts.length - 1; i >= 0; i--) {
+      const impact = this.impacts[i]
+      if (!impact) continue
+      if (impact.update(dt)) continue
+      impact.dispose()
+      this.impacts.splice(i, 1)
+    }
+  }
+
+  private spawnImpact(x: number, y: number, z: number, color: string, scale = 1): void {
+    const impact = new Impact(x, y, z, color, scale)
+    this.scene.add(impact.group)
+    this.impacts.push(impact)
+  }
+
+  private hasRivalNear(x: number, z: number, radius: number): boolean {
+    for (const rival of this.rivals) {
+      if (rival.knockedOut) continue
+      const dx = rival.x - x
+      const dz = rival.z - z
+      if (dx * dx + dz * dz <= radius * radius) return true
+    }
+    return false
+  }
+
+  private explodeBomb(bomb: Bomb): void {
+    const radius = BOMB_CONFIG.radius
+    let hits = 0
+    let knockedOut = 0
+    for (const rival of this.rivals) {
+      if (rival.knockedOut) continue
+      const dx = rival.x - bomb.x
+      const dz = rival.z - bomb.z
+      if (dx * dx + dz * dz > radius * radius) continue
+      rival.knock(rival.x >= bomb.x ? 1 : -1)
+      rival.stun = 1.6
+      rival.hurtCooldown = 1.6
+      hits += 1
+      if (rival.damage(BOMB_CONFIG.damage)) knockedOut += 1
+    }
+
+    const blast = new Blast(bomb.x, bomb.y, bomb.z, radius)
+    this.scene.add(blast.group)
+    this.blasts.push(blast)
+    this.spray.burst(bomb.x, bomb.y + 0.4, bomb.z, 26)
+    this.shake = Math.max(this.shake, 1)
+    skiAudio.explosion()
+
+    if (hits === 0 || this.phase !== 'running') return
+    const bonus = BOMB_CONFIG.bonus * hits + RIVAL_CONFIG.koBonus * knockedOut
+    this.score += bonus
+    if (this.hasCrowdNearby()) skiAudio.cheer()
+    this.pushToast(
+      knockedOut > 0
+        ? `爆弹炸翻 ${knockedOut} 名滑雪者 · +${bonus} 分`
+        : `爆弹命中 ${hits} 名滑雪者 · +${bonus} 分`,
+      'good',
+    )
+    this.emitHud()
+  }
+
+  private clearEffects(): void {
+    for (const bomb of this.bombs) bomb.dispose()
+    this.bombs.length = 0
+    for (const blast of this.blasts) blast.dispose()
+    this.blasts.length = 0
+    for (const impact of this.impacts) impact.dispose()
+    this.impacts.length = 0
   }
 
   private clearRivals(): void {
@@ -1138,6 +1467,7 @@ export class SkiRun {
     skiAudio.stopAmbience()
     this.clearRivals()
     this.clearTruck()
+    this.clearEffects()
     for (const chunk of this.chunks) disposeChunk(chunk)
     this.chunks.length = 0
     this.branches.length = 0

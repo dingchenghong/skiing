@@ -309,6 +309,153 @@ class SkiAudio {
     thud.stop(t + 0.3)
   }
 
+  /** 挥雪杖：破风声，命中时再加一声脆响 */
+  swing(hit: boolean): void {
+    const ctx = this.ensure()
+    const master = this.master
+    if (!ctx || !master) return
+    const t = ctx.currentTime
+    const buffer = this.noiseBuffer(0.32, 0.16, 1.1)
+    if (buffer) {
+      const noise = ctx.createBufferSource()
+      noise.buffer = buffer
+      const filter = ctx.createBiquadFilter()
+      filter.type = 'bandpass'
+      filter.Q.value = 1.3
+      filter.frequency.setValueAtTime(1700, t)
+      filter.frequency.exponentialRampToValueAtTime(380, t + 0.22)
+      const gain = ctx.createGain()
+      gain.gain.setValueAtTime(0.0001, t)
+      gain.gain.exponentialRampToValueAtTime(0.16, t + 0.035)
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.26)
+      noise.connect(filter).connect(gain).connect(master)
+      noise.start(t)
+      noise.stop(t + 0.28)
+    }
+    if (!hit) return
+
+    const clack = ctx.createOscillator()
+    const clackGain = ctx.createGain()
+    clack.type = 'triangle'
+    clack.frequency.setValueAtTime(1240, t + 0.1)
+    clack.frequency.exponentialRampToValueAtTime(520, t + 0.22)
+    clackGain.gain.setValueAtTime(0.0001, t + 0.1)
+    clackGain.gain.exponentialRampToValueAtTime(0.2, t + 0.112)
+    clackGain.gain.exponentialRampToValueAtTime(0.0001, t + 0.25)
+    clack.connect(clackGain).connect(master)
+    clack.start(t + 0.1)
+    clack.stop(t + 0.27)
+  }
+
+  /** 飞踢：低沉的破风声，命中时补一记闷响 */
+  kick(hit: boolean): void {
+    const ctx = this.ensure()
+    const master = this.master
+    if (!ctx || !master) return
+    const t = ctx.currentTime
+    const buffer = this.noiseBuffer(0.3, 0.2, 1)
+    if (buffer) {
+      const noise = ctx.createBufferSource()
+      noise.buffer = buffer
+      const filter = ctx.createBiquadFilter()
+      filter.type = 'bandpass'
+      filter.frequency.setValueAtTime(960, t)
+      filter.frequency.exponentialRampToValueAtTime(240, t + 0.2)
+      filter.Q.value = 1.1
+      const gain = ctx.createGain()
+      gain.gain.setValueAtTime(0.0001, t)
+      gain.gain.exponentialRampToValueAtTime(0.15, t + 0.04)
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.24)
+      noise.connect(filter).connect(gain).connect(master)
+      noise.start(t)
+      noise.stop(t + 0.26)
+    }
+    if (!hit) return
+
+    const thud = ctx.createOscillator()
+    const thudGain = ctx.createGain()
+    thud.type = 'sine'
+    thud.frequency.setValueAtTime(190, t + 0.09)
+    thud.frequency.exponentialRampToValueAtTime(56, t + 0.27)
+    thudGain.gain.setValueAtTime(0.0001, t + 0.09)
+    thudGain.gain.exponentialRampToValueAtTime(0.26, t + 0.104)
+    thudGain.gain.exponentialRampToValueAtTime(0.0001, t + 0.3)
+    thud.connect(thudGain).connect(master)
+    thud.start(t + 0.09)
+    thud.stop(t + 0.32)
+  }
+
+  /** 丢爆弹：引线被点着的“嘶——” */
+  bombDrop(): void {
+    const ctx = this.ensure()
+    const master = this.master
+    if (!ctx || !master) return
+    const t = ctx.currentTime
+    const buffer = this.noiseBuffer(0.55, 0.12, 1.1)
+    if (buffer) {
+      const noise = ctx.createBufferSource()
+      noise.buffer = buffer
+      const filter = ctx.createBiquadFilter()
+      filter.type = 'highpass'
+      filter.frequency.value = 2200
+      const gain = ctx.createGain()
+      gain.gain.setValueAtTime(0.0001, t)
+      gain.gain.exponentialRampToValueAtTime(0.09, t + 0.06)
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.44)
+      noise.connect(filter).connect(gain).connect(master)
+      noise.start(t)
+      noise.stop(t + 0.46)
+    }
+
+    const osc = ctx.createOscillator()
+    const oscGain = ctx.createGain()
+    osc.type = 'triangle'
+    osc.frequency.setValueAtTime(760, t)
+    osc.frequency.exponentialRampToValueAtTime(320, t + 0.18)
+    oscGain.gain.setValueAtTime(0.0001, t)
+    oscGain.gain.exponentialRampToValueAtTime(0.06, t + 0.02)
+    oscGain.gain.exponentialRampToValueAtTime(0.0001, t + 0.22)
+    osc.connect(oscGain).connect(master)
+    osc.start(t)
+    osc.stop(t + 0.24)
+  }
+
+  /** 爆弹爆炸：低频轰鸣 + 冲击波噪声 */
+  explosion(): void {
+    const ctx = this.ensure()
+    const master = this.master
+    if (!ctx || !master) return
+    const t = ctx.currentTime
+
+    const boom = ctx.createOscillator()
+    const boomGain = ctx.createGain()
+    boom.type = 'sine'
+    boom.frequency.setValueAtTime(120, t)
+    boom.frequency.exponentialRampToValueAtTime(28, t + 0.55)
+    boomGain.gain.setValueAtTime(0.0001, t)
+    boomGain.gain.exponentialRampToValueAtTime(0.48, t + 0.02)
+    boomGain.gain.exponentialRampToValueAtTime(0.0001, t + 0.7)
+    boom.connect(boomGain).connect(master)
+    boom.start(t)
+    boom.stop(t + 0.75)
+
+    const buffer = this.noiseBuffer(1, 0.5, 1.4)
+    if (!buffer) return
+    const noise = ctx.createBufferSource()
+    noise.buffer = buffer
+    const filter = ctx.createBiquadFilter()
+    filter.type = 'lowpass'
+    filter.frequency.setValueAtTime(1600, t)
+    filter.frequency.exponentialRampToValueAtTime(180, t + 0.8)
+    const gain = ctx.createGain()
+    gain.gain.setValueAtTime(0.0001, t)
+    gain.gain.exponentialRampToValueAtTime(0.36, t + 0.03)
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.85)
+    noise.connect(filter).connect(gain).connect(master)
+    noise.start(t)
+    noise.stop(t + 0.9)
+  }
+
   hit(kind: 'snowball' | 'rock' | 'tree' | 'log'): void {
     const ctx = this.ensure()
     if (!ctx || !this.master) return
@@ -340,6 +487,46 @@ class SkiAudio {
     gain.gain.exponentialRampToValueAtTime(0.0001, t + (soft ? 0.25 : 0.35))
     noise.connect(filter).connect(gain).connect(this.master)
     noise.start(t)
+  }
+
+  /**
+   * 打中 / 踢中对手的打击感：短促的爆裂声 + 低频冲击。
+   * 挥杆偏清脆，飞踢偏沉闷。
+   */
+  impact(kind: 'punch' | 'kick'): void {
+    const ctx = this.ensure()
+    const master = this.master
+    if (!ctx || !master) return
+    const t = ctx.currentTime
+    const bright = kind === 'punch'
+
+    const buffer = this.noiseBuffer(0.18, 0.15, 1.2)
+    if (buffer) {
+      const noise = ctx.createBufferSource()
+      noise.buffer = buffer
+      const filter = ctx.createBiquadFilter()
+      filter.type = 'highpass'
+      filter.frequency.value = bright ? 1600 : 900
+      const gain = ctx.createGain()
+      gain.gain.setValueAtTime(0.0001, t)
+      gain.gain.exponentialRampToValueAtTime(bright ? 0.28 : 0.22, t + 0.006)
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.16)
+      noise.connect(filter).connect(gain).connect(master)
+      noise.start(t)
+      noise.stop(t + 0.18)
+    }
+
+    const osc = ctx.createOscillator()
+    const oscGain = ctx.createGain()
+    osc.type = bright ? 'triangle' : 'sine'
+    osc.frequency.setValueAtTime(bright ? 1500 : 220, t)
+    osc.frequency.exponentialRampToValueAtTime(bright ? 620 : 52, t + 0.18)
+    oscGain.gain.setValueAtTime(0.0001, t)
+    oscGain.gain.exponentialRampToValueAtTime(bright ? 0.16 : 0.3, t + 0.01)
+    oscGain.gain.exponentialRampToValueAtTime(0.0001, t + 0.26)
+    osc.connect(oscGain).connect(master)
+    osc.start(t)
+    osc.stop(t + 0.3)
   }
 
   /** 观众反应：随机挑一种——掌声 / 喝彩 / 喊叫 / 尖叫 */

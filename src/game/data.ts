@@ -52,6 +52,81 @@ export const OBSTACLE_CONFIG: Record<ObstacleKind, ObstacleConfig> = {
   log: { label: '倒木', health: 22, penalty: 140, radius: 0.98, clearance: 0.82 },
 }
 
+export type AttackKind = 'punch' | 'kick'
+export type ActionKind = AttackKind | 'jump' | 'bomb'
+
+export interface AttackConfig {
+  label: string
+  /** 冷却时间（秒） */
+  cooldown: number
+  /** 前后方向可命中的距离 */
+  range: number
+  /** 左右方向可命中的距离 */
+  reach: number
+  /** 命中得分 */
+  bonus: number
+  /** 对对手造成的伤害 */
+  damage: number
+  /** 动作动画时长 */
+  duration: number
+}
+
+/** 贴身攻击：挥雪杖打人、抬脚踢人 */
+export const ATTACK_CONFIG: Record<AttackKind, AttackConfig> = {
+  punch: { label: '挥杆', cooldown: 0.5, range: 3.6, reach: 3, bonus: 150, damage: 60, duration: 0.5 },
+  kick: { label: '飞踢', cooldown: 0.7, range: 3, reach: 2.6, bonus: 220, damage: 80, duration: 0.58 },
+}
+
+export interface RivalConfig {
+  /** 对手满血值 */
+  maxHealth: number
+  /** 击倒对手的额外得分 */
+  koBonus: number
+  /** 对手主动出手的距离 */
+  attackRange: number
+  /** 对手两次出手的间隔 */
+  attackInterval: number
+}
+
+export const RIVAL_CONFIG: RivalConfig = {
+  maxHealth: 100,
+  koBonus: 200,
+  attackRange: 2.4,
+  attackInterval: 2.2,
+}
+
+export interface BombConfig {
+  label: string
+  cooldown: number
+  /** 丢下后多久才会被靠近的对手引爆 */
+  armDelay: number
+  /** 对手进入这个半径就会引爆 */
+  triggerRadius: number
+  /** 爆炸伤害半径 */
+  radius: number
+  /** 每命中一人得分 */
+  bonus: number
+  /** 对对手造成的伤害 */
+  damage: number
+  /** 动作动画时长 */
+  duration: number
+  /** 最多在雪地上躺多久 */
+  life: number
+}
+
+/** 爆弹：丢在身后，靠近的对手会把它引爆 */
+export const BOMB_CONFIG: BombConfig = {
+  label: '爆弹',
+  cooldown: 2.6,
+  armDelay: 0.35,
+  triggerRadius: 2.4,
+  radius: 5,
+  bonus: 260,
+  damage: 140,
+  duration: 0.5,
+  life: 2.4,
+}
+
 export const GAME = {
   maxHealth: 100,
   maxSpeed: 54,

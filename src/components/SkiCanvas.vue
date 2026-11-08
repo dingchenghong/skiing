@@ -24,8 +24,11 @@ interface WorldApi {
   togglePause: () => boolean
   quit: () => void
   jump: () => void
+  attack: (kind: 'punch' | 'kick') => void
+  bomb: () => void
   setTouch: (action: 'left' | 'right' | 'up' | 'down', pressed: boolean) => void
   setSteer: (value: number) => void
+  setSpin: (value: number) => void
 }
 
 const world = ref<WorldApi | null>(null)
@@ -43,9 +46,12 @@ defineExpose({
   togglePause: () => world.value?.togglePause() ?? false,
   quit: () => world.value?.quit(),
   jump: () => world.value?.jump(),
+  attack: (kind: 'punch' | 'kick') => world.value?.attack(kind),
+  bomb: () => world.value?.bomb(),
   setTouch: (action: 'left' | 'right' | 'up' | 'down', pressed: boolean) =>
     world.value?.setTouch(action, pressed),
   setSteer: (value: number) => world.value?.setSteer(value),
+  setSpin: (value: number) => world.value?.setSpin(value),
 })
 </script>
 

@@ -66,8 +66,11 @@ export default defineComponent({
       togglePause: () => game?.togglePause() ?? false,
       quit: () => game?.quit(),
       jump: () => game?.jump(),
+      attack: (kind: 'punch' | 'kick') => game?.attack(kind),
+      bomb: () => game?.dropBomb(),
       setTouch: (action: 'left' | 'right' | 'up' | 'down', pressed: boolean) => game?.setTouch(action, pressed),
       setSteer: (value: number) => game?.setSteer(value),
+      setSpin: (value: number) => game?.setSpin(value),
     }
     expose(api)
 

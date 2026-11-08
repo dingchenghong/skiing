@@ -1,6 +1,8 @@
 import * as THREE from 'three'
 import type { JacketOption } from './data'
 
+export type SkierAction = 'punch' | 'kick' | 'bomb'
+
 export interface SkierPose {
   pitch: number
   yaw: number
@@ -11,6 +13,14 @@ export interface SkierPose {
   time: number
   airborne: boolean
   airHeight: number
+  /** 当前正在播的动作 */
+  action?: SkierAction | null
+  /** 动作进度 0 ~ 1 */
+  actionProgress?: number
+  /** 出手方向：-1 左侧，1 右侧 */
+  actionSide?: number
+  /** 摇杆画圈带来的身体旋转角度（弧度，顺时针为正） */
+  spin?: number
 }
 
 /** 程序化低模滑雪员，背对镜头、朝 -Z 下滑 */
@@ -22,6 +32,7 @@ export class Skier {
   private skiMaterial: THREE.MeshStandardMaterial
   private bibMaterial: THREE.MeshStandardMaterial
   private arms: THREE.Group[] = []
+  private legs: THREE.Group[] = []
   private skis: THREE.Mesh[] = []
   private head: THREE.Group | null = null
   private crashed = false
@@ -92,15 +103,25 @@ export class Skier {
       binding.position.set(side * 0.3, 0.15, 0.1)
     }
 
-    // 靴子与腿
+    // 靴子与腿：腿挂在髋部枢轴上，方便做踢腿动作
     const legGeo = new THREE.CylinderGeometry(0.085, 0.095, 0.72, 8)
     for (const side of [-1, 1]) {
-      const bootMesh = add(new THREE.Mesh(new THREE.BoxGeometry(0.19, 0.17, 0.42), boot))
-      bootMesh.position.set(side * 0.28, 0.25, 0.1)
+      const hip = new THREE.Group()
+      hip.position.set(side * 0.25, 1.06, 0.12)
+      hip.rotation.x = 0.18
+      this.tilt.add(hip)
+      this.legs.push(hip)
 
-      const leg = add(new THREE.Mesh(legGeo, pants))
-      leg.position.set(side * 0.25, 0.7, 0.12)
-      leg.rotation.x = 0.18
+      const leg = new THREE.Mesh(legGeo, pants)
+      leg.position.y = -0.36
+      leg.castShadow = true
+      hip.add(leg)
+
+      // 靴子跟着髋部一起摆，位置与之前的静态造型保持一致
+      const bootMesh = new THREE.Mesh(new THREE.BoxGeometry(0.19, 0.17, 0.42), boot)
+      bootMesh.position.set(side * 0.03, -0.8, 0.125)
+      bootMesh.castShadow = true
+      hip.add(bootMesh)
     }
 
     // 躯干
@@ -237,13 +258,20 @@ export class Skier {
     const air = pose.airborne ? Math.min(1, pose.airHeight / 3) : 0
     this.group.rotation.y = pose.yaw
     this.tilt.rotation.x = pose.pitch + air * 0.16
+    this.tilt.rotation.y = 0
     this.tilt.rotation.z = pose.lean + Math.sin(pose.time * 7.2) * 0.012 * speedFactor
     this.tilt.position.y = air * 0.035
 
     this.arms.forEach((arm, index) => {
       const swing = Math.sin(cadence + index * Math.PI) * (0.16 + speedFactor * 0.1) * (1 - air * 0.6)
       arm.rotation.x = (pose.airborne ? -0.72 : -0.45) + swing
+      arm.rotation.y = 0
       arm.rotation.z = (index === 0 ? -1 : 1) * (0.22 + Math.abs(pose.steering) * 0.06 + air * 0.12)
+    })
+
+    this.legs.forEach(leg => {
+      leg.rotation.x = 0.18
+      leg.rotation.z = 0
     })
 
     this.skis.forEach((ski, index) => {
@@ -259,6 +287,72 @@ export class Skier {
       this.head.rotation.y = pose.steering * 0.16
       this.head.rotation.z = -pose.steering * 0.05
     }
+
+    this.applyAction(pose)
+    // 摇杆顺时针画圈（spin 为正）对应俯视顺时针转体，绕 Y 轴就是负方向
+    const spin = pose.spin ?? 0
+    if (spin !== 0) this.tilt.rotation.y -= spin
+  }
+
+  /** 挥杆 / 飞踢 / 丢爆弹的动作特写 */
+  private applyAction(pose: SkierPose): void {
+    const action = pose.action ?? null
+    if (!action) return
+    const t = Math.max(0, Math.min(1, pose.actionProgress ?? 0))
+    // 先蓄力再发力：中段幅度最大，收尾回到滑行姿态
+    const swing = Math.sin(Math.min(1, t * 1.15) * Math.PI)
+    const side = (pose.actionSide ?? 1) >= 0 ? 1 : -1
+
+    if (action === 'punch') {
+      // 目标在哪边就用哪只手，另一边的手臂向后拉开保持平衡
+      const arm = this.arms[side > 0 ? 1 : 0]
+      const offArm = this.arms[side > 0 ? 0 : 1]
+      if (arm) {
+        // 手臂先向外侧抬起，再朝前方横扫出去
+        arm.rotation.x = -0.45 + swing * 0.75
+        arm.rotation.z = side * (0.22 + swing * 1.25)
+        arm.rotation.y = side * swing * 0.7
+      }
+      if (offArm) {
+        offArm.rotation.x = -0.45 - swing * 0.5
+        offArm.rotation.z = -side * (0.22 + swing * 0.35)
+      }
+      // 身体朝出拳侧拧一下，同时向那一侧压重心
+      this.tilt.rotation.y = -side * swing * 0.4
+      this.tilt.rotation.z -= side * swing * 0.17
+      this.tilt.position.y -= swing * 0.035
+      if (this.head) this.head.rotation.y -= side * swing * 0.3
+      return
+    }
+
+    if (action === 'kick') {
+      // 目标在哪边就抬哪条腿，支撑腿微屈，身体向反方向侧倾
+      const leg = this.legs[side > 0 ? 1 : 0]
+      const supportLeg = this.legs[side > 0 ? 0 : 1]
+      if (leg) {
+        leg.rotation.x = 0.18 + swing * 1.7
+        leg.rotation.z = side * swing * 0.42
+      }
+      if (supportLeg) supportLeg.rotation.x = 0.18 + swing * 0.16
+      this.arms.forEach((arm, index) => {
+        const armSide = index === 0 ? -1 : 1
+        arm.rotation.x = -0.45 - swing * 0.35
+        arm.rotation.z = armSide * (0.22 + swing * 0.55)
+      })
+      this.tilt.rotation.y = -side * swing * 0.32
+      this.tilt.rotation.z += side * swing * 0.28
+      this.tilt.position.y -= swing * 0.02
+      if (this.head) this.head.rotation.y -= side * swing * 0.28
+      return
+    }
+
+    // 丢爆弹：双臂向后甩，身体略微下蹲
+    this.arms.forEach((arm, index) => {
+      arm.rotation.x = -0.45 + swing * 0.85
+      arm.rotation.z = (index === 0 ? -1 : 1) * (0.22 + swing * 0.25)
+    })
+    this.tilt.rotation.x += swing * 0.14
+    this.tilt.position.y -= swing * 0.05
   }
 
   crash(): void {

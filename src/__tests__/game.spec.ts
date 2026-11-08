@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { heightAt, slopeAt } from '../game/terrain'
-import { GAME, JACKETS, OBSTACLE_CONFIG, jacketById } from '../game/data'
+import { ATTACK_CONFIG, BOMB_CONFIG, GAME, JACKETS, OBSTACLE_CONFIG, RIVAL_CONFIG, jacketById } from '../game/data'
 
 describe('雪道高度函数', () => {
   it('沿下滑方向持续降低', () => {
@@ -45,5 +45,34 @@ describe('滑雪配置', () => {
     expect(jumpHeight).toBeGreaterThan(OBSTACLE_CONFIG.snowball.clearance)
     expect(jumpHeight).toBeGreaterThan(OBSTACLE_CONFIG.log.clearance)
     expect(jumpHeight).toBeGreaterThan(2.5)
+  })
+})
+
+describe('动作系统配置', () => {
+  it('挥杆和飞踢都有冷却、判定范围与得分', () => {
+    Object.values(ATTACK_CONFIG).forEach(config => {
+      expect(config.cooldown).toBeGreaterThan(0)
+      expect(config.duration).toBeGreaterThan(0)
+      expect(config.range).toBeGreaterThan(1)
+      expect(config.reach).toBeGreaterThan(1)
+      expect(config.bonus).toBeGreaterThan(0)
+      expect(config.damage).toBeGreaterThan(0)
+    })
+  })
+
+  it('两下挥杆能打倒一个对手，爆弹一发就能炸翻', () => {
+    expect(ATTACK_CONFIG.punch.damage * 2).toBeGreaterThanOrEqual(RIVAL_CONFIG.maxHealth)
+    expect(ATTACK_CONFIG.kick.damage * 2).toBeGreaterThanOrEqual(RIVAL_CONFIG.maxHealth)
+    expect(BOMB_CONFIG.damage).toBeGreaterThanOrEqual(RIVAL_CONFIG.maxHealth)
+  })
+
+  it('对手主动出手的距离不超过玩家踢腿的判定范围', () => {
+    expect(RIVAL_CONFIG.attackRange).toBeLessThanOrEqual(ATTACK_CONFIG.kick.reach)
+  })
+
+  it('爆弹的爆炸范围大于引爆范围，且冷却长于存留时间', () => {
+    expect(BOMB_CONFIG.radius).toBeGreaterThan(BOMB_CONFIG.triggerRadius)
+    expect(BOMB_CONFIG.cooldown).toBeGreaterThan(BOMB_CONFIG.life)
+    expect(BOMB_CONFIG.bonus).toBeGreaterThan(0)
   })
 })

@@ -2,14 +2,37 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { storeToRefs } from 'pinia'
 import SkiCanvas from '@/components/SkiCanvas.vue'
-import { JACKETS, type HudSnapshot, type RunResult } from '@/game/data'
+import { ATTACK_CONFIG, BOMB_CONFIG, JACKETS, type HudSnapshot, type RunResult } from '@/game/data'
 import { skiAudio } from '@/game/audio'
 import { useSkiStore } from '@/stores/ski'
 
 type Phase = 'ready' | 'running' | 'paused' | 'over'
 type Action = 'left' | 'right' | 'up' | 'down'
+type ActionButton = 'jump' | 'punch' | 'kick' | 'bomb'
 type Tone = 'good' | 'bad' | 'info'
 type OrientationMode = 'auto' | 'landscape' | 'portrait'
+
+interface ActionPad {
+  id: ActionButton
+  key: string
+  name: string
+  label: string
+}
+
+/** A 跳 / B 打 / C 踢 / D 爆弹，移动端两排斜向右上 */
+const ACTION_PADS: ActionPad[] = [
+  { id: 'jump', key: 'A', name: '跳跃', label: '跳' },
+  { id: 'punch', key: 'B', name: '挥杆击打', label: '打' },
+  { id: 'kick', key: 'C', name: '飞踢', label: '踢' },
+  { id: 'bomb', key: 'D', name: '丢爆弹', label: '爆' },
+]
+const ACTION_ROWS: ActionPad[][] = [ACTION_PADS.slice(0, 2), ACTION_PADS.slice(2)]
+const ACTION_KEYS: Record<string, ActionButton> = {
+  KeyA: 'jump',
+  KeyS: 'punch',
+  KeyD: 'kick',
+  KeyW: 'bomb',
+}
 
 const store = useSkiStore()
 const { jacket, jacketId, best, muted } = storeToRefs(store)
@@ -20,13 +43,29 @@ const phase = ref<Phase>('ready')
 const result = ref<RunResult | null>(null)
 const newBest = ref(false)
 const toast = ref<{ id: number; text: string; tone: Tone } | null>(null)
-const jumpPressed = ref(false)
+const actionHeld = reactive<Record<ActionButton, boolean>>({
+  jump: false,
+  punch: false,
+  kick: false,
+  bomb: false,
+})
+const actionCooling = reactive<Record<ActionButton, boolean>>({
+  jump: false,
+  punch: false,
+  kick: false,
+  bomb: false,
+})
+const coolTimers = new Map<ActionButton, number>()
+const flashTimers = new Map<ActionButton, number>()
 const touchState = reactive<Record<Action, boolean>>({ left: false, right: false, up: false, down: false })
 const uiHidden = ref(false)
 const joyActive = ref(false)
 const joyPos = reactive({ x: 0, y: 0 })
 const orientationMode = ref<OrientationMode>('auto')
 const isPortrait = ref(false)
+/** 可视视口尺寸（手机浏览器工具栏会占掉一部分） */
+const viewportW = ref(window.innerWidth)
+const viewportH = ref(window.innerHeight)
 const hud = reactive<HudSnapshot>({
   score: 0,
   distance: 0,
@@ -164,9 +203,40 @@ function clearActions(): void {
   ;(['left', 'right', 'up', 'down'] as Action[]).forEach(action => setAction(action, false))
 }
 
-function jumpPress(pressed: boolean, event?: PointerEvent): void {
+/** 四个动作按钮在移动端的冷却时间（与游戏内保持一致） */
+function cooldownOf(kind: ActionButton): number {
+  if (kind === 'bomb') return BOMB_CONFIG.cooldown
+  if (kind === 'punch') return ATTACK_CONFIG.punch.cooldown
+  if (kind === 'kick') return ATTACK_CONFIG.kick.cooldown
+  return 0.3
+}
+
+function startCooldown(kind: ActionButton): void {
+  if (kind === 'jump') return
+  actionCooling[kind] = true
+  window.clearTimeout(coolTimers.get(kind) ?? 0)
+  coolTimers.set(
+    kind,
+    window.setTimeout(() => {
+      actionCooling[kind] = false
+      coolTimers.delete(kind)
+    }, cooldownOf(kind) * 1000),
+  )
+}
+
+function triggerAction(kind: ActionButton): void {
+  if (phase.value !== 'running') return
+  if (kind !== 'jump' && actionCooling[kind]) return
+  skiAudio.ensure()
+  if (kind === 'jump') canvas.value?.jump()
+  else if (kind === 'bomb') canvas.value?.bomb()
+  else canvas.value?.attack(kind)
+  startCooldown(kind)
+}
+
+function actionPress(kind: ActionButton, pressed: boolean, event?: PointerEvent): void {
   if (!pressed) {
-    jumpPressed.value = false
+    actionHeld[kind] = false
     return
   }
   if (phase.value !== 'running') return
@@ -177,24 +247,45 @@ function jumpPress(pressed: boolean, event?: PointerEvent): void {
       /* 部分嵌入环境不支持指针捕获 */
     }
   }
-  jumpPressed.value = true
-  skiAudio.ensure()
-  canvas.value?.jump()
+  actionHeld[kind] = true
+  triggerAction(kind)
+}
+
+/** 键盘按下时让按钮闪一下，操作和画面能对上 */
+function flashAction(kind: ActionButton): void {
+  actionHeld[kind] = true
+  window.clearTimeout(flashTimers.get(kind) ?? 0)
+  flashTimers.set(
+    kind,
+    window.setTimeout(() => {
+      actionHeld[kind] = false
+      flashTimers.delete(kind)
+    }, 140),
+  )
 }
 
 function resetTouch(): void {
-  jumpPressed.value = false
+  ;(['jump', 'punch', 'kick', 'bomb'] as ActionButton[]).forEach(kind => {
+    actionHeld[kind] = false
+    actionCooling[kind] = false
+  })
+  coolTimers.forEach(timer => window.clearTimeout(timer))
+  coolTimers.clear()
+  flashTimers.forEach(timer => window.clearTimeout(timer))
+  flashTimers.clear()
   joyActive.value = false
   joyPos.x = 0
   joyPos.y = 0
   joyPointerId = -1
+  stopJoyListeners()
+  resetSpinInput()
   canvas.value?.setSteer(0)
   clearActions()
 }
 
 /* ---------- 虚拟摇杆 ---------- */
 /** 转向死区：轻微拨动不生效 */
-const JOY_DEAD = 0.18
+const JOY_DEAD = 0.14
 /** 加速 / 刹车的竖向死区 */
 const THROTTLE_DEAD = 0.42
 
@@ -203,35 +294,92 @@ function steerCurve(nx: number): number {
   const abs = Math.min(1, Math.abs(nx))
   if (abs <= JOY_DEAD) return 0
   const t = (abs - JOY_DEAD) / (1 - JOY_DEAD)
-  return Math.sign(nx) * Math.pow(t, 1.55)
+  return Math.sign(nx) * Math.pow(t, 1.25)
 }
 
 let joyPointerId = -1
 let joyCenter = { x: 0, y: 0 }
 let joyMax = 44
 
+/** 摇杆离中心超过这个比例才参与画圈判定 */
+const SPIN_RADIUS = 0.72
+/** 单次采样允许的半径变化，太大说明是直线/斜向拖动 */
+const SPIN_MAX_RADIAL_STEP = 0.14
+/** 同一方向累积转够这个角度才真正开始转体（约 280°） */
+const SPIN_ARM_CHARGE = 4.9
+/** 停顿超过这个时间就清空累积，避免下次一拖就误触发 */
+const SPIN_PAUSE_MS = 320
+/** 单次采样允许的最大角速度，防止抖动乱转 */
+const MAX_SPIN_RATE = 16
+let spinAngle = 0
+let spinRadius = 0
+let spinLastTime = 0
+let spinRate = 0
+let spinCharge = 0
+let spinDir = 0
+let spinTracking = false
+
+function resetSpinInput(): void {
+  spinTracking = false
+  spinRate = 0
+  spinCharge = 0
+  spinDir = 0
+  canvas.value?.setSpin(0)
+}
+
 function joyDown(event: PointerEvent): void {
   if (phase.value !== 'running') return
   const el = event.currentTarget
   if (!(el instanceof HTMLElement)) return
-  try {
-    el.setPointerCapture(event.pointerId)
-  } catch {
-    /* 部分嵌入环境不支持指针捕获 */
-  }
   joyPointerId = event.pointerId
   joyActive.value = true
   const rect = el.getBoundingClientRect()
   joyCenter = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }
   joyMax = Math.max(26, Math.min(rect.width, rect.height) / 2 - 26)
+  // 手指滑出摇杆范围时也要继续跟手，所以监听挂在 window 上
+  window.addEventListener('pointermove', onJoyPointerMove, { passive: false })
+  window.addEventListener('pointerup', onJoyPointerUp)
+  window.addEventListener('pointercancel', onJoyPointerUp)
   joyMove(event)
+}
+
+function onJoyPointerMove(event: PointerEvent): void {
+  if (!joyActive.value || event.pointerId !== joyPointerId) return
+  event.preventDefault()
+  joyMove(event)
+}
+
+function onJoyPointerUp(event: PointerEvent): void {
+  if (event.pointerId !== joyPointerId) return
+  joyUp(event)
+}
+
+function stopJoyListeners(): void {
+  window.removeEventListener('pointermove', onJoyPointerMove)
+  window.removeEventListener('pointerup', onJoyPointerUp)
+  window.removeEventListener('pointercancel', onJoyPointerUp)
+}
+
+/**
+ * 把屏幕坐标的位移换算到游戏自己的坐标系。
+ * 强制横屏 / 竖屏时整个游戏被 CSS 旋转了，指针坐标也要跟着转回来，
+ * 否则会出现“手指向上、摇杆头却往右”的情况。
+ */
+function toGameDelta(sx: number, sy: number): { dx: number; dy: number } {
+  if (rotationClass.value === 'rotate-cw') return { dx: sy, dy: -sx }
+  if (rotationClass.value === 'rotate-ccw') return { dx: -sy, dy: sx }
+  return { dx: sx, dy: sy }
 }
 
 function joyMove(event: PointerEvent): void {
   if (!joyActive.value || event.pointerId !== joyPointerId) return
-  let dx = event.clientX - joyCenter.x
-  let dy = event.clientY - joyCenter.y
+  const screenX = event.clientX - joyCenter.x
+  const screenY = event.clientY - joyCenter.y
+  const { dx: rawDx, dy: rawDy } = toGameDelta(screenX, screenY)
+  let dx = rawDx
+  let dy = rawDy
   const length = Math.hypot(dx, dy)
+  const radius = Math.min(1, length / joyMax)
   if (length > joyMax) {
     dx = (dx / length) * joyMax
     dy = (dy / length) * joyMax
@@ -240,6 +388,7 @@ function joyMove(event: PointerEvent): void {
   joyPos.y = dy
   const nx = dx / joyMax
   const ny = dy / joyMax
+  updateSpinInput(dx, dy, radius)
   canvas.value?.setSteer(steerCurve(nx))
   setAction('up', ny < -THROTTLE_DEAD)
   setAction('down', ny > THROTTLE_DEAD)
@@ -251,8 +400,79 @@ function joyUp(event?: PointerEvent): void {
   joyPointerId = -1
   joyPos.x = 0
   joyPos.y = 0
+  stopJoyListeners()
+  resetSpinInput()
   canvas.value?.setSteer(0)
   clearActions()
+}
+
+/* ---------- 摇杆画圈 → 身体旋转 ---------- */
+/**
+ * 用摇杆指针相对圆心的极角变化算角速度：
+ * 屏幕上顺时针为正（与 atan2 在 y 轴朝下时的方向一致），逆时针为负。
+ * 只有贴着摇杆外圈、且角速度和半径都比较平稳地持续转动时才算画圈，
+ * 避免左右甩动被误判成旋转。
+ */
+function updateSpinInput(dx: number, dy: number, radius: number): void {
+  if (radius < SPIN_RADIUS) {
+    resetSpinInput()
+    return
+  }
+  const now = performance.now()
+  const angle = Math.atan2(dy, dx)
+  if (!spinTracking) {
+    spinTracking = true
+    spinAngle = angle
+    spinRadius = radius
+    spinLastTime = now
+    spinCharge = 0
+    spinDir = 0
+    return
+  }
+
+  // 手指停顿后重新滑动，之前的累积作废
+  if (now - spinLastTime > SPIN_PAUSE_MS) {
+    spinCharge = 0
+    spinDir = 0
+    spinRate *= 0.5
+  }
+
+  const dt = (now - spinLastTime) / 1000
+  let delta = angle - spinAngle
+  if (delta > Math.PI) delta -= Math.PI * 2
+  else if (delta < -Math.PI) delta += Math.PI * 2
+  const radialStep = Math.abs(radius - spinRadius)
+  spinAngle = angle
+  spinRadius = radius
+  spinLastTime = now
+
+  const raw = dt > 0.004 && dt < 0.25 ? delta / dt : 0
+  if (radialStep > SPIN_MAX_RADIAL_STEP || Math.abs(raw) > MAX_SPIN_RATE * 1.6) {
+    // 直线/斜向拖动的特征：半径跳变或角速度突变
+    spinRate *= 0.5
+    spinCharge = 0
+    spinDir = 0
+    canvas.value?.setSpin(spinRate)
+    return
+  }
+
+  const dir = delta >= 0 ? 1 : -1
+  if (dir === spinDir) spinCharge += Math.abs(delta)
+  else {
+    spinDir = dir
+    spinCharge = Math.abs(delta)
+  }
+
+  // 先转够一圈左右的同向弧才算真的在画圈
+  if (spinCharge < SPIN_ARM_CHARGE) {
+    spinRate *= 0.5
+    canvas.value?.setSpin(spinRate)
+    return
+  }
+
+  const clamped = Math.max(-MAX_SPIN_RATE, Math.min(MAX_SPIN_RATE, raw))
+  spinRate += (clamped - spinRate) * 0.5
+  canvas.value?.setSpin(spinRate)
 }
 
 /* ---------- 轻点屏幕：只收起速度 / 体力面板 ---------- */
@@ -280,7 +500,10 @@ function onTapUp(event: PointerEvent): void {
 }
 
 /* ---------- 横屏 / 竖屏切换 ---------- */
-function syncViewportOrientation(): void {
+function syncViewport(): void {
+  const vv = window.visualViewport
+  viewportW.value = Math.round(vv?.width ?? window.innerWidth)
+  viewportH.value = Math.round(vv?.height ?? window.innerHeight)
   isPortrait.value = window.matchMedia('(orientation: portrait)').matches
 }
 
@@ -295,6 +518,14 @@ function cycleOrientation(): void {
 function onKeydown(event: KeyboardEvent): void {
   const target = event.target
   if (target instanceof HTMLElement && target.closest('input, textarea, select')) return
+  const actionKey = ACTION_KEYS[event.code]
+  if (actionKey) {
+    event.preventDefault()
+    if (event.repeat || phase.value !== 'running') return
+    flashAction(actionKey)
+    triggerAction(actionKey)
+    return
+  }
   if (event.code === 'Escape' || event.code === 'KeyP') {
     if (phase.value === 'running' || phase.value === 'paused') {
       event.preventDefault()
@@ -320,17 +551,26 @@ onMounted(() => {
   window.addEventListener('keydown', onKeydown)
   window.addEventListener('pointerdown', wakeAudio, { passive: true })
   skiAudio.setMuted(muted.value)
-  syncViewportOrientation()
-  window.addEventListener('resize', syncViewportOrientation)
-  window.addEventListener('orientationchange', syncViewportOrientation)
+  syncViewport()
+  window.addEventListener('resize', syncViewport)
+  window.addEventListener('orientationchange', syncViewport)
+  window.visualViewport?.addEventListener('resize', syncViewport)
+  window.visualViewport?.addEventListener('scroll', syncViewport)
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeydown)
   window.removeEventListener('pointerdown', wakeAudio)
-  window.removeEventListener('resize', syncViewportOrientation)
-  window.removeEventListener('orientationchange', syncViewportOrientation)
+  window.removeEventListener('resize', syncViewport)
+  window.removeEventListener('orientationchange', syncViewport)
+  window.visualViewport?.removeEventListener('resize', syncViewport)
+  window.visualViewport?.removeEventListener('scroll', syncViewport)
+  stopJoyListeners()
   window.clearTimeout(toastTimer)
+  coolTimers.forEach(timer => window.clearTimeout(timer))
+  coolTimers.clear()
+  flashTimers.forEach(timer => window.clearTimeout(timer))
+  flashTimers.clear()
 })
 </script>
 
@@ -338,7 +578,12 @@ onBeforeUnmount(() => {
   <div
     class="ski-game"
     :class="[rotationClass, { 'ui-hidden': uiHidden }]"
-    :style="{ '--accent': jacket.color, '--accent-soft': jacket.accent }"
+    :style="{
+      '--accent': jacket.color,
+      '--accent-soft': jacket.accent,
+      '--vvw': `${viewportW}px`,
+      '--vvh': `${viewportH}px`,
+    }"
     @pointerdown="onTapDown"
     @pointerup="onTapUp"
   >
@@ -448,9 +693,9 @@ onBeforeUnmount(() => {
           <i :style="{ width: `${Math.max(0, hud.health)}%`, background: healthColor }" />
         </div>
         <p class="health-hint">
-          {{ hud.health <= 30 ? '体力告急，稳住！' : '撞到雪团、岩石会掉体力并扣分' }}
+          {{ hud.health <= 30 ? '体力告急，稳住！' : '撞到障碍、被对手打中都会掉体力' }}
         </p>
-        <div class="key-hint">← → 控向 <b>·</b> ↑ ↓ 调速 <b>·</b> Space 跳 <b>·</b> Esc 暂停</div>
+        <div class="key-hint">← → 控向 <b>·</b> ↑ ↓ 调速 <b>·</b> A 跳 <b>·</b> S 打 <b>·</b> D 踢 <b>·</b> W 爆弹 <b>·</b> Esc 暂停</div>
       </section>
     </div>
 
@@ -462,10 +707,6 @@ onBeforeUnmount(() => {
           role="slider"
           aria-label="方向摇杆"
           @pointerdown.prevent="joyDown"
-          @pointermove.prevent="joyMove"
-          @pointerup.prevent="joyUp"
-          @pointercancel.prevent="joyUp"
-          @lostpointercapture="joyUp"
         >
           <span class="joy-arm n" />
           <span class="joy-arm s" />
@@ -474,23 +715,33 @@ onBeforeUnmount(() => {
           <span class="joy-core" />
           <span class="joy-knob" :style="{ transform: `translate(${joyPos.x}px, ${joyPos.y}px)` }" />
         </div>
-        <small class="joy-label">{{ joyActive ? '滑动中' : '左右滑动 / 上推加速' }}</small>
+        <small class="joy-label">{{ joyActive ? '滑动中' : '滑动控向 · 上推加速 · 画圈转体' }}</small>
       </div>
 
-      <button
-        type="button"
-        class="jump-pad"
-        :class="{ pressed: jumpPressed }"
-        aria-label="跳跃"
-        @pointerdown.prevent="jumpPress(true, $event)"
-        @pointerup.prevent="jumpPress(false)"
-        @pointercancel.prevent="jumpPress(false)"
-        @lostpointercapture="jumpPress(false)"
-      >
-        <span class="pad-well">
-          <span class="pad-cap" />
-        </span>
-      </button>
+      <div class="action-pad" data-ui>
+        <div v-for="(row, rowIndex) in ACTION_ROWS" :key="rowIndex" class="action-row">
+          <button
+            v-for="pad in row"
+            :key="pad.id"
+            type="button"
+            class="act-pad"
+            :data-kind="pad.id"
+            :class="{ pressed: actionHeld[pad.id], cooling: actionCooling[pad.id] }"
+            :aria-label="`${pad.key} ${pad.name}`"
+            @pointerdown.prevent="actionPress(pad.id, true, $event)"
+            @pointerup.prevent="actionPress(pad.id, false)"
+            @pointercancel.prevent="actionPress(pad.id, false)"
+            @lostpointercapture="actionPress(pad.id, false)"
+          >
+            <span class="pad-well">
+              <span class="pad-cap">
+                <b>{{ pad.key }}</b>
+                <em>{{ pad.label }}</em>
+              </span>
+            </span>
+          </button>
+        </div>
+      </div>
     </div>
 
     <Transition name="panel">
@@ -501,7 +752,8 @@ onBeforeUnmount(() => {
           <p class="title-en">POWDER RUSH</p>
           <p class="intro">
             从雪山顶一路冲下去。左右控向，前后调速，避开雪团、岩石和倒木。
-            雪道偶尔会分叉，还会冒出别的滑雪者，偶尔甚至有一辆卡车冲上雪道。
+            雪道偶尔会分叉，还会冒出别的滑雪者——他们会伸手打你，记得先挥杆或飞踢反击。
+            偶尔甚至有一辆卡车冲上雪道。
             空中飘着的面包、钻石和护盾要跳起来才吃得到；剪刀、冰锥、石块碰不得。
           </p>
 
@@ -542,12 +794,16 @@ onBeforeUnmount(() => {
               <span>大跳 / 越过障碍</span>
             </div>
             <div class="control-item">
+              <div class="keys"><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd><kbd>W</kbd></div>
+              <span>跳 / 打 / 踢 / 爆弹</span>
+            </div>
+            <div class="control-item">
               <div class="keys"><kbd>Esc</kbd></div>
               <span>暂停</span>
             </div>
             <div class="control-item touch-note">
-              <div class="keys"><kbd>摇杆</kbd><kbd>跳</kbd></div>
-              <span>手机：左手滑动控向，右手轻点起跳，轻点屏幕可收起数据面板</span>
+              <div class="keys"><kbd>摇杆</kbd><kbd>A</kbd><kbd>B</kbd><kbd>C</kbd><kbd>D</kbd></div>
+              <span>手机：左手摇杆控向（画圈可转体），右手 A 跳、B 打、C 踢、D 爆弹，轻点屏幕可收起数据面板</span>
             </div>
           </div>
 
@@ -640,6 +896,9 @@ onBeforeUnmount(() => {
 .ski-game {
   position: fixed;
   inset: 0;
+  height: 100vh;
+  /* 优先用 JS 写入的可见视口高度，手机浏览器工具栏不会把底部内容顶出屏幕 */
+  height: var(--vvh, 100dvh);
   overflow: hidden;
   color: #f4fbff;
   background: #dfeaf7;
@@ -688,9 +947,9 @@ onBeforeUnmount(() => {
 
 .hud-top {
   position: absolute;
-  top: 20px;
-  left: 20px;
-  right: 20px;
+  top: calc(20px + env(safe-area-inset-top));
+  left: calc(20px + env(safe-area-inset-left));
+  right: calc(20px + env(safe-area-inset-right));
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -824,9 +1083,9 @@ onBeforeUnmount(() => {
 
 .hud-bottom {
   position: absolute;
-  left: 20px;
-  right: 20px;
-  bottom: 20px;
+  left: calc(20px + env(safe-area-inset-left));
+  right: calc(20px + env(safe-area-inset-right));
+  bottom: calc(20px + env(safe-area-inset-bottom));
   display: flex;
   align-items: flex-end;
   justify-content: space-between;
@@ -852,15 +1111,20 @@ onBeforeUnmount(() => {
   top: 0;
   width: 100vh;
   height: 100vw;
+  /* 用可见视口尺寸，避免手机浏览器工具栏让旋转后的一条边被裁掉 */
+  width: var(--vvh, 100dvh);
+  height: var(--vvw, 100dvw);
   transform-origin: top left;
 }
 
 .ski-game.rotate-cw {
   transform: translate(100vw, 0) rotate(90deg);
+  transform: translate(var(--vvw, 100dvw), 0) rotate(90deg);
 }
 
 .ski-game.rotate-ccw {
   transform: translate(0, 100vh) rotate(-90deg);
+  transform: translate(0, var(--vvh, 100dvh)) rotate(-90deg);
 }
 
 .stat-card {
@@ -1068,7 +1332,9 @@ onBeforeUnmount(() => {
   display: none;
   align-items: flex-end;
   justify-content: space-between;
-  padding: 0 18px;
+  gap: 12px;
+  padding-left: calc(18px + env(safe-area-inset-left));
+  padding-right: calc(28px + env(safe-area-inset-right));
   pointer-events: none;
   transition: opacity 220ms ease, transform 220ms ease;
 }
@@ -1181,14 +1447,35 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 
-.jump-pad {
+.action-pad {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 2px;
+  margin-right: 3px;
+  flex: 0 0 auto;
+}
+
+/* 每一排都略微斜向右上，像街机面板 */
+.action-row {
+  display: flex;
+  gap: 7px;
+  transform: rotate(-8deg);
+  transform-origin: 50% 50%;
+}
+
+.action-row + .action-row {
+  transform: rotate(-8deg) translateX(5px);
+}
+
+.act-pad {
   position: relative;
   display: grid;
   place-items: center;
-  width: 104px;
-  height: 104px;
-  font-size: 104px;
-  margin-bottom: 4px;
+  width: 1em;
+  height: 1em;
+  font-size: 60px;
+  margin: 0;
   padding: 0;
   border: 0;
   border-radius: 50%;
@@ -1202,18 +1489,31 @@ onBeforeUnmount(() => {
   box-shadow:
     inset 0 0 0 1.5px rgba(196, 234, 255, 0.3),
     inset 0 10px 20px rgba(3, 14, 26, 0.36),
-    0 16px 32px rgba(4, 15, 27, 0.22);
+    0 14px 26px rgba(4, 15, 27, 0.22);
   backdrop-filter: blur(8px);
-  opacity: 0.8;
+  opacity: 0.78;
   cursor: pointer;
   touch-action: none;
   -webkit-tap-highlight-color: transparent;
-  transition: opacity 160ms ease;
+  transition: opacity 160ms ease, transform 110ms cubic-bezier(0.3, 0.9, 0.4, 1);
 }
 
-.jump-pad.pressed,
-.jump-pad:active {
+.act-pad[data-kind='bomb'] {
+  --accent: #ff8a3d;
+  --accent-soft: #ffd9a8;
+}
+
+.act-pad.pressed,
+.act-pad:active {
   opacity: 1;
+}
+
+.act-pad.cooling {
+  opacity: 0.4;
+}
+
+.act-pad.cooling .pad-cap {
+  filter: saturate(0.45) brightness(0.9);
 }
 
 /* 凹槽：按键嵌在里面 */
@@ -1230,6 +1530,11 @@ onBeforeUnmount(() => {
     inset 0 -1px 0 rgba(255, 255, 255, 0.12),
     0 1px 0 rgba(255, 255, 255, 0.14);
   pointer-events: none;
+}
+
+.act-pad .pad-well {
+  width: 0.78em;
+  height: 0.78em;
 }
 
 /* 有体积感的小按钮：平时凸起，按下真正沉入凹槽 */
@@ -1263,8 +1568,41 @@ onBeforeUnmount(() => {
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.22);
 }
 
-.jump-pad.pressed .pad-cap,
-.jump-pad:active .pad-cap {
+.act-pad .pad-cap {
+  display: grid;
+  place-items: center;
+  width: 0.68em;
+  height: 0.68em;
+}
+
+/* 按钮上的字母 + 小中文提示 */
+.act-pad .pad-cap b {
+  position: relative;
+  z-index: 1;
+  margin-top: -0.12em;
+  color: #ffffff;
+  font-size: 15px;
+  font-weight: 900;
+  line-height: 1;
+  letter-spacing: 0.02em;
+  text-shadow: 0 1px 2px rgba(3, 14, 26, 0.55);
+}
+
+.act-pad .pad-cap em {
+  position: absolute;
+  right: 0;
+  bottom: 2px;
+  left: 0;
+  color: rgba(255, 255, 255, 0.8);
+  font-size: 8px;
+  font-style: normal;
+  line-height: 1;
+  letter-spacing: 0.04em;
+  text-align: center;
+}
+
+.act-pad.pressed .pad-cap,
+.act-pad:active .pad-cap {
   transform: translateY(0.05em) scale(0.99);
   filter: brightness(1.08);
   box-shadow:
@@ -1274,8 +1612,8 @@ onBeforeUnmount(() => {
     inset 0 1px 0 rgba(255, 255, 255, 0.24);
 }
 
-.jump-pad.pressed .pad-cap::after,
-.jump-pad:active .pad-cap::after {
+.act-pad.pressed .pad-cap::after,
+.act-pad:active .pad-cap::after {
   opacity: 0.5;
 }
 
@@ -1712,9 +2050,9 @@ kbd {
   }
 
   .hud-bottom {
-    bottom: calc(174px + env(safe-area-inset-bottom));
-    left: 14px;
-    right: 14px;
+    bottom: calc(188px + env(safe-area-inset-bottom));
+    left: calc(14px + env(safe-area-inset-left));
+    right: calc(14px + env(safe-area-inset-right));
     gap: 8px;
   }
 
@@ -1736,9 +2074,9 @@ kbd {
   }
 
   .hud-top {
-    top: 12px;
-    left: 12px;
-    right: 12px;
+    top: calc(12px + env(safe-area-inset-top));
+    left: calc(12px + env(safe-area-inset-left));
+    right: calc(12px + env(safe-area-inset-right));
   }
 
   .brand-chip {
@@ -1862,20 +2200,17 @@ kbd {
     margin: -26px 0 0 -26px;
   }
 
-  .jump-pad {
-    width: 92px;
-    height: 92px;
-    font-size: 92px;
-    padding: 0;
+  .act-pad {
+    font-size: 54px;
   }
 
   .joy-label {
     font-size: 8px;
   }
   .hud-bottom {
-    bottom: calc(160px + env(safe-area-inset-bottom));
-    left: 10px;
-    right: 10px;
+    bottom: calc(178px + env(safe-area-inset-bottom));
+    left: calc(10px + env(safe-area-inset-left));
+    right: calc(10px + env(safe-area-inset-right));
   }
 
   .stat-card {
@@ -1890,28 +2225,27 @@ kbd {
 
 @media (orientation: landscape) and (max-height: 560px) {
   .hud-bottom {
-    bottom: calc(128px + env(safe-area-inset-bottom));
+    bottom: calc(170px + env(safe-area-inset-bottom));
   }
 
+  /* 横屏也用和竖屏一样大的摇杆，保证有效行程 */
   .joy {
-    width: 104px;
-    height: 104px;
+    width: 132px;
+    height: 132px;
   }
 
   .joy-core {
-    inset: 20px;
+    inset: 26px;
   }
 
   .joy-knob {
-    width: 46px;
-    height: 46px;
-    margin: -23px 0 0 -23px;
+    width: 58px;
+    height: 58px;
+    margin: -29px 0 0 -29px;
   }
 
-  .jump-pad {
-    width: 84px;
-    height: 84px;
-    font-size: 84px;
+  .act-pad {
+    font-size: 54px;
     margin-bottom: 0;
   }
 
@@ -1920,26 +2254,66 @@ kbd {
   }
 }
 
+/* 特别矮的手机横屏：摇杆只缩一点点，同时把 HUD 压矮 */
+@media (orientation: landscape) and (max-height: 430px) {
+  .touch-controls {
+    bottom: calc(8px + env(safe-area-inset-bottom));
+  }
+
+  .hud-bottom {
+    bottom: calc(154px + env(safe-area-inset-bottom));
+  }
+
+  .joy {
+    width: 128px;
+    height: 128px;
+  }
+
+  .joy-core {
+    inset: 25px;
+  }
+
+  .joy-knob {
+    width: 56px;
+    height: 56px;
+    margin: -28px 0 0 -28px;
+  }
+
+  .act-pad {
+    font-size: 48px;
+  }
+
+  .stat-card {
+    padding: 7px 10px;
+  }
+
+  .speed-row strong {
+    font-size: 24px;
+  }
+
+  .health-hint {
+    display: none;
+  }
+}
+
 /* 强制横屏时也用小一号的控件，避免挡住雪道 */
 .ski-game.rotate-cw .hud-bottom {
-  bottom: calc(128px + env(safe-area-inset-bottom));
+  bottom: calc(170px + env(safe-area-inset-bottom));
 }
 
 .ski-game.rotate-cw .joy {
-  width: 104px;
-  height: 104px;
+  width: 132px;
+  height: 132px;
 }
 
 .ski-game.rotate-cw .joy-knob {
-  width: 46px;
-  height: 46px;
-  margin: -23px 0 0 -23px;
+  width: 58px;
+  height: 58px;
+  margin: -29px 0 0 -29px;
 }
 
-.ski-game.rotate-cw .jump-pad {
-  width: 84px;
-  height: 84px;
-  font-size: 84px;
+.ski-game.rotate-cw .act-pad {
+  font-size: 54px;
 }
 
 .ski-game.rotate-cw .joy-label {
