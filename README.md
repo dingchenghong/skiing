@@ -64,3 +64,7 @@ pnpm build
 ![webui](https://raw.githubusercontent.com/dingchenghong/skiing/refs/heads/main/screen/screen2.jpg)
 ![webui](https://raw.githubusercontent.com/dingchenghong/skiing/refs/heads/main/screen/screen3.jpg)
 ![webui](https://raw.githubusercontent.com/dingchenghong/skiing/refs/heads/main/screen/screen4.jpg)
+
+## 在线链接地址
+
+[点击试玩](https://skiing-24g.pages.dev '链接地址')
