@@ -19,14 +19,14 @@
 
 ## 操作
 
-| 按键 | 作用 |
-| --- | --- |
-| `←` `→` / `A` `D` | 左右转向 |
-| `↑` `↓` / `W` `S` | 加速 / 刹车 |
-| `Space` | 大跳（可越过雪团、岩石和倒木） |
-| `Esc` / `P` | 暂停 |
-| `R` | 结算界面再来一局 |
-| `M` | 静音开关 |
+| 按键              | 作用                           |
+| ----------------- | ------------------------------ |
+| `←` `→` / `A` `D` | 左右转向                       |
+| `↑` `↓` / `W` `S` | 加速 / 刹车                    |
+| `Space`           | 大跳（可越过雪团、岩石和倒木） |
+| `Esc` / `P`       | 暂停                           |
+| `R`               | 结算界面再来一局               |
+| `M`               | 静音开关                       |
 
 手机上使用屏幕底部的方向按钮，底部正中间的圆形「跳」按钮负责起跳；开始页可以选择滑雪服颜色，选择会立即同步到 3D 滑雪员。
 
@@ -57,3 +57,10 @@ pnpm build
 - `src/game/audio.ts` — 风声、雪声、撞击、欢呼、里程碑音效
 - `src/game/effects.ts` — 围绕镜头的飘雪与雪雾粒子
 - `src/stores/ski.ts` — 配色、静音、最高分持久化
+
+## 截图如下
+
+![webui](https://raw.githubusercontent.com/dingchenghong/skiing/refs/heads/main/screen/screen1.jpg)
+![webui](https://raw.githubusercontent.com/dingchenghong/skiing/refs/heads/main/screen/screen2.jpg)
+![webui](https://raw.githubusercontent.com/dingchenghong/skiing/refs/heads/main/screen/screen3.jpg)
+![webui](https://raw.githubusercontent.com/dingchenghong/skiing/refs/heads/main/screen/screen4.jpg)
